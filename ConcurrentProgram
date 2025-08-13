@@ -1,0 +1,17 @@
+class Customer(threading.Thread):
+    def __init__(self, name, inventory, lock):
+        super().__init__()
+        self.name = name
+        self.inventory = inventory
+        self.lock = lock
+    
+    def run(self):
+        self.purchase("apples", 2)
+
+    def purchase(self, item, qty):
+        with self.lock:  # Critical section
+            if self.inventory[item] >= qty:
+                self.inventory[item] -= qty
+                print(f"{self.name} bought {qty} {item}")
+            else:
+                print(f"{self.name} couldn't buy {item} (out of stock)")
