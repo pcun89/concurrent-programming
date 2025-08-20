@@ -1,17 +1,125 @@
-class Customer(threading.Thread):
-    def __init__(self, name, inventory, lock):
-        super().__init__()
-        self.name = name
-        self.inventory = inventory
-        self.lock = lock
-    
-    def run(self):
-        self.purchase("apples", 2)
+"""
 
-    def purchase(self, item, qty):
-        with self.lock:  # Critical section
-            if self.inventory[item] >= qty:
-                self.inventory[item] -= qty
-                print(f"{self.name} bought {qty} {item}")
-            else:
-                print(f"{self.name} couldn't buy {item} (out of stock)")
+This script simulates a shop with customers and shop assistants operating concurrently.
+It demonstrates:
+1) An UNSAFE run (no synchronization) that can corrupt inventory (race conditions).
+2) A SAFE run using threading.Lock to protect shared state and threading.Semaphore to
+   constrain the number of concurrent checkouts.
+
+How to run:
+    python shop.py
+
+You can tweak the SCENARIOS in main() to see different behaviors.
+"""
+
+import threading
+import time
+from typing import Dict, List, Tuple
+
+
+class Inventory:
+    """
+    Thread-safe (optional) inventory wrapper around a dictionary mapping item -> quantity.
+    If a lock is provided, operations will be protected by the lock.
+    """
+
+    def __init__(self, initialStock: Dict[str, int], lock: threading.Lock | None = None):
+        self._stock: Dict[str, int] = initialStock.copy()
+        self._lock = lock
+
+    def getQty(self, item: str) -> int:
+        """Return current quantity for an item (not locked unless lock provided)."""
+        if self._lock:
+            with self._lock:
+                return self._stock.get(item, 0)
+        return self._stock.get(item, 0)
+
+    def purchase(self, item: str, qty: int) -> bool:
+        """
+        Attempt to purchase `qty` units of `item`.
+        Returns True if fulfilled, False if insufficient stock.
+        This is the critical section in SAFE mode.
+        """
+        if self._lock:
+            with self._lock:
+                return self._purchaseUnsafe(item, qty)
+        # UNSAFE path (no lock)
+        return self._purchaseUnsafe(item, qty)
+
+    def restock(self, item: str, qty: int) -> None:
+        """
+        Increase inventory for `item` by `qty`.
+        """
+        if self._lock:
+            with self._lock:
+                self._stock[item] = self._stock.get(item, 0) + qty
+                return
+        # UNSAFE path
+        self._stock[item] = self._stock.get(item, 0) + qty
+
+    def snapshot(self) -> Dict[str, int]:
+        """Return a copy of the inventory for reporting."""
+        if self._lock:
+            with self._lock:
+                return self._stock.copy()
+        return self._stock.copy()
+
+    # -------- internal helpers --------
+    def _purchaseUnsafe(self, item: str, qty: int) -> bool:
+        """
+        Perform the read-check-write WITHOUT locking.
+        Intentionally separated to make race conditions easier to surface in UNSAFE mode.
+        """
+        current = self._stock.get(item, 0)
+        if current >= qty:
+            # Simulate a bit of work to amplify race windows
+            time.sleep(0.01)
+            self._stock[item] = current - qty
+            return True
+        return False
+
+
+class Checkout:
+    """
+    Represents a limited set of checkout counters using a semaphore.
+    Acquire before purchase, release after.
+    """
+
+    def __init__(self, numCounters: int | None):
+        self._sema = threading.Semaphore(numCounters) if numCounters else None
+
+    def acquire(self):
+        if self._sema:
+            self._sema.acquire()
+
+    def release(self):
+        if self._sema:
+            self._sema.release()
+
+
+class Customer(threading.Thread):
+    """
+    Customer thread: processes a list of (item, qty) purchases.
+    In SAFE mode, we acquire a checkout counter (semaphore) before purchasing.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        inventory: Inventory,
+        checkout: Checkout | None,
+        purchases: List[Tuple[str, int]],
+        delayBetweenOps: float = 0.005,
+    ):
+        super().__init__(name=name)
+        self.inventory = inventory
+        self.checkout = checkout
+        self.purchases = purchases
+        self.delayBetweenOps = delayBetweenOps
+        self.successful: List[Tuple[str, int]] = []
+        self.failed: List[Tuple[str, int]] = []
+
+    def run(self):
+        for item, qty in self.purchases:
+            if self.checkout:
+                self.checkout.acquire()
