@@ -1,0 +1,87 @@
+import unittest
+from typing import Dict, List, Tuple
+from shop import runScenario  # ensure shop.py is in the same folder
+
+
+def computeExpectedFinal(
+    initialStock: Dict[str, int],
+    customerPlans: List[Tuple[str, List[Tuple[str, int]]]],
+    restockPlans: List[Tuple[str, List[Tuple[str, int, float]]]],
+) -> Dict[str, int]:
+    """
+    Deterministic expected inventory, assuming thread-safe semantics:
+    final[item] = max(0, initial[item] + sum(restocks[item]) - sum(requests[item]))
+    """
+    # Start with initial
+    expected = {k: v for k, v in initialStock.items()}
+    # Apply restocks
+    for _, restocks in restockPlans:
+        for item, qty, _ in restocks:
+            expected[item] = expected.get(item, 0) + qty
+    # Subtract requests
+    requests = {}
+    for _, purchases in customerPlans:
+        for item, qty in purchases:
+            requests[item] = requests.get(item, 0) + qty
+    for item, totalReq in requests.items():
+        expected[item] = max(0, expected.get(item, 0) - totalReq)
+    return expected
+
+
+class TestShopConcurrent(unittest.TestCase):
+    def test_safe_scenario_final_inventory_matches_expected(self):
+        """
+        Verifies that the SAFE (locked + optional semaphore) scenario
+        yields the exact expected final inventory.
+        """
+        initialStock = {"apples": 10, "bananas": 8, "oranges": 5}
+        customerPlans = [
+            ("Alice", [("apples", 3), ("bananas", 2), ("apples", 2)]),
+            ("Bob",   [("apples", 4), ("bananas", 2)]),
+            ("Cleo",  [("apples", 2), ("oranges", 2), ("bananas", 1)]),
+            ("Dave",  [("oranges", 3)]),
+        ]
+        restockPlans = [
+            ("Sam", [("apples", 5, 0.02), ("oranges", 2, 0.04)]),
+        ]
+        # Run in SAFE mode with 2 checkout counters
+        finalInv = runScenario(
+            title="TEST SAFE",
+            useLock=True,
+            numCounters=2,
+            initialStock=initialStock,
+            customerPlans=customerPlans,
+            restockPlans=restockPlans,
+        )
+        expected = computeExpectedFinal(initialStock, customerPlans, restockPlans)
+        self.assertEqual(finalInv, expected)
+
+    def test_lock_prevents_negative_and_matches_bulk_expected(self):
+        """
+        Stress-lite test: many small purchases + restock with SAFE mode.
+        Ensures we never go negative and final matches the closed-form expectation.
+        """
+        initialStock = {"apples": 20, "bananas": 0}
+        # 50 customers buy 1 apple each (total demand = 50)
+        customerPlans = [(f"C{i}", [("apples", 1)]) for i in range(50)]
+        # Restock 40 apples early to permit enough supply (20+40=60)
+        restockPlans = [("R1", [("apples", 40, 0.01)])]
+
+        finalInv = runScenario(
+            title="TEST SAFE BULK",
+            useLock=True,
+            numCounters=3,
+            initialStock=initialStock,
+            customerPlans=customerPlans,
+            restockPlans=restockPlans,
+        )
+
+        # Closed-form expected: apples = 20 + 40 - 50 = 10
+        expected = computeExpectedFinal(initialStock, customerPlans, restockPlans)
+        # Sanity: no negatives and exact match
+        self.assertTrue(all(qty >= 0 for qty in finalInv.values()))
+        self.assertEqual(finalInv, expected)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
